@@ -19,4 +19,4 @@ if (subscriptionId is null || resourceGroupName is null || serverName is null)
 
 var elasticPoolManager = new ElasticPoolManager(configuration);
 
-elasticPoolManager.CreateDatabaseAsync(9, "Mister Suits").Wait();
+elasticPoolManager.CreateDatabaseAsync(10, "Mister Suits").Wait();

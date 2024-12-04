@@ -5,6 +5,7 @@ using Azure.ResourceManager;
 using Azure.ResourceManager.Resources;
 using Azure.ResourceManager.Sql;
 using Azure.ResourceManager.Sql.Models;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 
 namespace ElasticPoolDemo;
@@ -17,6 +18,7 @@ public class ElasticPoolManager
     private string? _sqlServerName;
     private SqlSku? _sqlSku;
     private ElasticPoolPerDatabaseSettings? _perDatabaseSettings;
+    private string? _connectionString;
     
     
     public ElasticPoolManager(IConfiguration configuration)
@@ -25,6 +27,19 @@ public class ElasticPoolManager
         CreateAzureConfiguration(configuration);
         CreateSku(configuration);
         CreatePerDatabaseSettings(configuration);
+        CreateConnectionString(configuration);
+    }
+    
+    private void CreateConnectionString(IConfiguration configuration)
+    {
+        string? connectionString = configuration["ConnectionString"];
+        
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            throw new Exception("ConnectionString must be provided in the configuration file");
+        }
+        
+        _connectionString = connectionString;
     }
 
     private void CreateMaxDatabasesPerPool(IConfiguration configuration)
@@ -109,6 +124,37 @@ public class ElasticPoolManager
         return resourceGroup.Value;
     }
     
+    private async Task<string> CreateUserForDatabase(string databaseName)
+    {
+        var userName = $"User_{Guid.NewGuid()}".Replace("-", "_");
+        var userPassword = Guid.NewGuid().ToString().Replace("-", "_");
+        
+        await using var masterConnection = new SqlConnection(_connectionString);
+        await masterConnection.OpenAsync();
+
+        var createLoginQuery = $"""
+                                    CREATE LOGIN {userName} WITH PASSWORD = '{userPassword}';
+                                """;
+
+        await using var createLoginCommand = new SqlCommand(createLoginQuery, masterConnection);
+        await createLoginCommand.ExecuteNonQueryAsync();
+
+        string? dbConnectionString = _connectionString?.Replace("Initial Catalog=master", $"Initial Catalog={databaseName}");
+        await using var dbConnection = new SqlConnection(dbConnectionString);
+        await dbConnection.OpenAsync();
+
+        string createUserQuery = $"""
+                                      CREATE USER {userName} FOR LOGIN {userName};
+                                      ALTER ROLE db_datareader ADD MEMBER {userName};
+                                      ALTER ROLE db_datawriter ADD MEMBER {userName};
+                                  """;
+
+        await using var createUserCommand = new SqlCommand(createUserQuery, dbConnection);
+        await createUserCommand.ExecuteNonQueryAsync();
+
+        return $"Server=tcp:{dbConnection.DataSource},1433;Initial Catalog={databaseName};Persist Security Info=False;User ID={userName};Password={userPassword};MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;";
+    }
+
     private async Task<SqlServerResource> GetSqlServerResource(ResourceGroupResource resourceGroup)
     {
         var sqlServer = await resourceGroup.GetSqlServers().GetAsync(_sqlServerName);
@@ -183,7 +229,7 @@ public class ElasticPoolManager
             ElasticPoolId = targetPool.Id
         });
         
-        var connectionString = $"Server=tcp:{sqlServer.Data.FullyQualifiedDomainName},1433;Initial Catalog={databaseName};Persist Security Info=False;User ID=[USER_ID];Password=[USER_PASSWORD];MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;";
+        string connectionString = await CreateUserForDatabase(databaseName);
 
         Console.WriteLine($"Database '{databaseName}' created successfully. Connection string: {connectionString}");
     }
